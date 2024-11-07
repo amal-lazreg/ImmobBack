@@ -7,17 +7,26 @@ const UserSchema = new Schema({
     username: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, enum: ['admin', 'user'], default: 'user' } ,
+    role: { type: String, enum: ['admin', 'user'], default: 'user' },
 });
 
 // Méthode pour comparer le mot de passe hashé
-UserSchema.methods.comparePassword = function(candidatePassword) {
-    return bcrypt.compare(candidatePassword, this.password);
+UserSchema.methods.comparePassword = async function(candidatePassword) {
+    try {
+        const isMatch = await bcrypt.compare(candidatePassword, this.password);
+        console.log('Comparing passwords:', { candidatePassword, hashedPassword: this.password, isMatch });
+        return isMatch;
+    } catch (error) {
+        console.error('Error comparing passwords:', error);
+        return false;
+    }
 };
 
 // Middleware pour hasher le mot de passe avant de sauvegarder
 UserSchema.pre('save', function(next) {
     var user = this;
+
+    if (!user.isModified('password')) return next();
 
     const saltRounds = 10;
 

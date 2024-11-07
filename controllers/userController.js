@@ -1,19 +1,27 @@
 const User = require('../models/userModels');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
 const nodemailer = require('nodemailer');
+const { LocalStorage } = require('node-localstorage');
+
 const UserOTPVerification = require('../models/UserVerificationModel');
 const dotenv = require('dotenv');
-const SMTPConnection = require("nodemailer/lib/smtp-connection");
-let connection = new SMTPConnection(SMTPConnection);
-
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
-
-
-
-let poolConfig = "smtps://username:password@smtp.example.com/?pool=true";
-
 const secret = process.env.JWT_SECRET;
+const bcrypt = require('bcrypt');
+const localStorage = new LocalStorage('./localStorage');
+
+
+function storeUserInfo(username) {
+    if (!username || typeof username !== 'string') {
+      throw new Error('Nom d\'utilisateur invalide.');
+    }
+    
+    localStorage.setItem('username', username);
+  }
+
+
+
+
 
 // Setup nodemailer transporter
 let transporter = nodemailer.createTransport({
@@ -26,24 +34,32 @@ let transporter = nodemailer.createTransport({
     }
 });
 
-
-console.log('AUTH_EMAIL:', process.env.AUTH_EMAIL);
-console.log('AUTH_PASS:', process.env.AUTH_PASS);
-
 const signupController = async (req, res) => {
     try {
-        const { username, email, password } = req.body;
+        const { username, email, password, role } = req.body;
 
-        console.log('Received signup request with:', { username, email });
+        console.log('Received signup request with:', { username, email, role });
 
         if (!username || !email || !password) {
             console.log('Missing fields');
             return res.status(400).json({ message: 'Ensure username, email, and password are provided' });
         }
 
-        if (username === 'admin') {
-            console.log('Cannot create admin user through signup');
-            return res.status(403).json({ message: 'Cannot create admin user through signup' });
+        // Vérifier s'il existe déjà un utilisateur admin
+        const adminUser = await User.findOne({ role: 'admin' });
+
+        // Si un utilisateur admin existe déjà, tous les nouveaux utilisateurs doivent être des utilisateurs réguliers
+        if (adminUser) {
+            if (role === 'admin') {
+                console.log('An admin user already exists. Only regular users can be created now.');
+                return res.status(403).json({ message: 'An admin user already exists. Only regular users can be created now.' });
+            }
+        } else {
+            // Si aucun utilisateur admin n'existe, permettre la création du premier admin
+            if (role !== 'admin') {
+                console.log('First user must be an admin.');
+                return res.status(400).json({ message: 'First user must be created with the admin role.' });
+            }
         }
 
         const existingUser = await User.findOne({ $or: [{ username }, { email }] });
@@ -52,7 +68,10 @@ const signupController = async (req, res) => {
             return res.status(400).json({ message: 'Username or email already exists!' });
         }
 
-        const user = new User({ username, email, password, role: 'user' });
+        // Définir le rôle de l'utilisateur. Les utilisateurs ne peuvent être que des utilisateurs réguliers après le premier admin.
+        const userRole = adminUser ? 'user' : (role === 'admin' ? 'admin' : 'user');
+
+        const user = new User({ username, email, password, role: userRole });
 
         const savedUser = await user.save();
         console.log('User saved:', savedUser);
@@ -67,44 +86,33 @@ const signupController = async (req, res) => {
     }
 };
 
-const signinController = async (req, res) => {  
+
+const signinController = async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        // Recherche de l'utilisateur par nom d'utilisateur
         const user = await User.findOne({ username }).select('email username password role').exec();
-        console.log(user)
         if (!user) {
-            console.log('User not found:', username);
-            return res.json({ success: false, message: 'Could not authenticate user' });
-        } 
+            return res.status(401).json({ success: false, message: 'Could not authenticate user' });
+        }
 
-        // Vérification du mot de passe
         const validPassword = await user.comparePassword(password);
         if (!validPassword) {
-            console.log('Invalid password for user:', username);
-            return res.json({ success: false, message: 'Could not authenticate password' });
+            return res.status(401).json({ success: false, message: 'Could not authenticate password' });
         }
 
-        // Génération du jeton JWT
         const token = jwt.sign({ username: user.username, role: user.role }, secret, { expiresIn: '24h' });
-        console.log('User authenticated:', username);
-        
-        // Redirection en fonction du rôle
+
         if (user.role === 'admin') {
             return res.json({ success: true, message: 'Admin authenticated', token: token, role: 'admin' });
-            // Redirection ou réponse pour l'interface admin
         } else {
             return res.json({ success: true, message: 'User authenticated', token: token, role: 'user' });
-            // Redirection ou réponse pour l'interface utilisateur
         }
-        
     } catch (err) {
-        console.error('Error occurred during authentication:', err);
-        res.status(500).send('An error occurred while authenticating the user');
+        console.error('Error in signinController:', err);
+        res.status(500).send(`An error occurred while authenticating the user: ${err.message}`);
     }
 };
-
 
 const sendOTPVerificationEmail = async ({ _id, email }, res) => {
     try {
@@ -151,40 +159,80 @@ const sendOTPVerificationEmail = async ({ _id, email }, res) => {
     }
 };
 
-async function createAdmin() {
-    const adminUsername = 'admin';
-    const adminEmail = 'admin@example.com';
-    const adminPassword = 'password'; 
 
+const updateAdminProfile = async (req, res) => {
     try {
-        const existingAdmin = await User.findOne({ username: adminUsername });
-        if (existingAdmin) {
-            console.log('Admin already exists');
-            return;
+        const adminId = req.params._id;
+        const { username, email, newPassword } = req.body;
+
+        // Vérifier si l'utilisateur est un admin
+        const admin = await User.findById(adminId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(404).json({ message: 'Admin not found' });
         }
 
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(adminPassword, saltRounds);
+        // Mettre à jour le nom d'utilisateur
+        if (username) {
+            admin.username = username;
+        }
 
-        const admin = new User({
-            username: adminUsername,
-            password: hashedPassword,
-            email: adminEmail,
-            role: 'admin'
-        });
+        // Mettre à jour l'email
+        if (email) {
+            admin.email = email;
+        }
 
+        // Mettre à jour le mot de passe si fourni
+        if (newPassword) {
+            //const hashedPassword = await bcrypt.hash(newPassword, 10);
+            admin.password = newPassword;
+        }
+
+        // Enregistrer les modifications
         await admin.save();
-        console.log('Admin created successfully');
+
+        res.status(200).json({ message: 'Profile updated successfully' });
     } catch (error) {
-        console.error('Error creating admin:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+
+const getUserByIdController = async (req, res) => {
+    try {
+        const userId = req.params._id;
+        const user = await User.findById(userId).select('-password').exec();
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        res.status(200).json({ user });
+    } catch (err) {
+        console.error('Error in getUserByIdController:', err);
+        res.status(500).json({ message: 'An error occurred while retrieving the user' });
+    }
+};
+
+
+const getIdByUsername =  async (req, res) => {
+    const { username } = req.query;
+
+    if (!username) {
+        return res.status(400).json({ success: false, message: 'Username is required' });
+    }
+
+    try {
+        // const userId = await getIdByUsername(username);
+        const user = await User.$where(x=>x.username == userId);
+        res.json({ success: true, user });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
     }
 }
 
 
-
-createAdmin();
-
 module.exports = {
     signupController,
     signinController,
+    updateAdminProfile,
+    getUserByIdController,
+    getIdByUsername,
 };
